@@ -17,11 +17,12 @@ import (
 
 // Quote 文件模板的引用值
 type Quote struct {
-	APIName string
-	Summary string
-	URL     string
-	Method  string
-	Params  []interface{}
+	APIName     string
+	Summary     string
+	URL         string
+	Method      string
+	Params      []interface{}
+	RequestBody map[string]interface{}
 }
 
 func getDocs(url string) (string, error) {
@@ -74,7 +75,7 @@ func createFile(data string) error {
 		nameSlice[0] = strings.ToLower(nameSlice[0])
 		fileName := strings.Join(nameSlice, "")
 		// 写入文件
-		f, err := os.Create("./api/" + fileName + ".js")
+		f, err := os.Create("./src/api/" + fileName + ".js")
 		defer f.Close()
 		if err != nil {
 			fmt.Println(err)
@@ -90,13 +91,14 @@ func createFile(data string) error {
 }
 
 // 文件模板
-func textTemplate(apis, definitions gjson.Result) string {
+func textTemplate(apis, schemas gjson.Result) string {
 	res := `import request from '@/utils/request'
 `
 	for _, item := range apis.Array() {
 		item := item.String()
 		method := gjson.Get(item, "method").String()
 		url := gjson.Get(item, "url").String()
+		summary := gjson.Get(item, "summary").String()
 		if strings.Contains(url, "{") {
 			url = url[:strings.LastIndex(url, "{")-1]
 		}
@@ -109,45 +111,40 @@ func textTemplate(apis, definitions gjson.Result) string {
 			nameSlice[i] = toUp + v[1:]
 		}
 		apiName := method + strings.Join(nameSlice, "")
-		// 注释信息params
-		// var params []interface{}
-		// if apiObj["content"].Map()["parameters"].Exists() {
-		// 	parameters := apiObj["content"].Map()["parameters"]
-		// 	if apiObj["method"].String() == "get" {
-		// 		params = parameters.Value().([]interface{})
-		// 	}
-		// 	if apiObj["method"].String() == "post" {
-		// 		schema := parameters.Array()[0].Map()["schema"]
-		// 		if schema.String() != "" {
-		// 			adress := schema
-		// 			if _, ok := schema.Map()["items"]; ok {
-		// 				adress = schema.Map()["items"]
-		// 			}
-		// 			str := adress.Map()["$ref"].String()
-		// 			BOName := str[strings.LastIndex(str, "/")+1:]
-		// 			BO := definitions.Map()[BOName].Map()["properties"]
-		// 			for k, v := range BO.Map() {
-		// 				param := map[string]string{
-		// 					"name":        k,
-		// 					"description": v.Map()["description"].String(),
-		// 				}
-		// 				params = append(params, param)
-		// 			}
-		// 		} else {
-		// 			params = parameters.Value().([]interface{})
-		// 		}
-		// 	}
-		// }
+		// params参数
+		var params []interface{}
+		parameters := gjson.Get(item, "parameters").Value()
+		if parameters != nil {
+			params = parameters.([]interface{})
+		}
+		// requestBody参数 按数据类型返回参数信息
+		requestBody := make(map[string]interface{})
+		body := gjson.Get(item, "requestBody")
+		boName := ""
+		if body.Get("content.application/json").Exists() {
+			boName = body.Get("content.application/json.schema.$ref").String()
+			boName = boName[strings.LastIndex(boName, "/")+1:]
+			bo := schemas.Get(boName + ".properties")
+			requestBody = bo.Value().(map[string]interface{})
+		} else if body.Get("content.multipart/form-data").Exists() {
+			bo := body.Get("content.multipart/form-data.schema.properties")
+			requestBody = bo.Value().(map[string]interface{})
+		} else if body.Get("content.application/x-www-form-urlencoded").Exists() {
+			bo := body.Get("content.application/x-www-form-urlencoded.schema.properties")
+			requestBody = bo.Value().(map[string]interface{})
+		}
 		res = res + `
 /**
-	* @description {{.Summary}}{{range $index, $item := .Params}}
-	* @param {{$item.name}} {{$item.description}}{{end}}
-	*/
-export function {{.APIName}}(data) {
+ * @description {{.Summary}}{{range $index, $item := .Params}}
+ * @param {{$item.name}} { {{$item.schema.type}} } {{$item.description}}{{end}}{{range $key, $value := .RequestBody}}
+ * @request {{$key}} { {{$value.type}} } {{$value.description}}{{end}}
+ */
+export function {{.APIName}}({{if eq .Method "post"}}data{{else}}params, data{{end}}) {
 	return request({
 		url: '{{.URL}}',
 		method: '{{.Method}}',
-		{{if eq .Method "get"}}prams: {{end}}data,
+		{{if eq .Method "post"}}data,{{else}}params: params,
+		data: data,{{end}}
 	})
 }
 `
@@ -155,11 +152,13 @@ export function {{.APIName}}(data) {
 		t, _ := template.New("tem").Parse(res)
 		buf := new(bytes.Buffer)
 		valus := Quote{
-			APIName: apiName,
-			// Summary: apiObj["content"].Map()["summary"].String(),
-			URL:    url,
-			Method: method}
-		// Params:  params}
+			APIName:     apiName,
+			Summary:     summary,
+			URL:         url,
+			Method:      method,
+			Params:      params,
+			RequestBody: requestBody,
+		}
 		t.Execute(buf, valus)
 		res = buf.String()
 	}
